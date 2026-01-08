@@ -1,30 +1,35 @@
 // ==UserScript==
 // @name        JSS Caffeinate (SSO Optimized)
-// @version     0.5
+// @version     0.6
 // @description Keeps Jamf Pro sessions alive and uses direct SSO URL for re-authentication.
 // @match       https://hrt.jamfcloud.com/*
+// @grant       none
 // @noframes
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // CONFIGURATION
+    // 1. Reference Metadata for Logging
+    // Note: Since @grant is 'none', we access info through Tampermonkey's internal object if available
+    const scriptName = (typeof GM_info !== 'undefined') ? GM_info.script.name : "JSS Caffeinate";
+    const scriptVersion = (typeof GM_info !== 'undefined') ? GM_info.script.version : "0.6";
+
+    console.log(`[${scriptName} v${scriptVersion}] Script loaded and monitoring session.`);
+
     const ssoUrl = "https://hrt.jamfcloud.com/oauth2/authorization/idp-us-hudson-trading.com";
-    const delay = 120000; // 2 minutes between keep-alive events
-    const jssCaffeinateDebug = true; // Keep true initially to verify it works
-    const name = "JSS Caffeinate";
+    const delay = 120000; 
+    const jssCaffeinateDebug = true;
     let last = Date.now();
 
     const debug = (m) => {
         if (jssCaffeinateDebug) {
-            console.log(`${name} [${new Date().toLocaleTimeString()}]: ${m}`);
+            console.log(`${scriptName} [${new Date().toLocaleTimeString()}]: ${m}`);
         }
     };
 
     const login = () => {
-        debug("Session expired or logout detected. Redirecting to SSO...");
-        // Redirect directly to the OIDC launch URL for automated login
+        debug("Redirecting to SSO...");
         location.href = ssoUrl;
     };
 
@@ -39,20 +44,20 @@
         return null;
     };
 
-    const getDelay = (max) => Math.random() * (max - 2000) + 2000;
+    // 2. Improved Logout Detection
+    // Checks for /logout.html OR the presence of the "You have successfully logged out" text
+    const isLogoutPage = location.pathname.includes('/logout') || 
+                         document.body.innerText.includes("successfully logged out");
 
-    // Detect if we are on the logout page
-    if (location.pathname.includes('/logout.html')) {
-        debug("Logout page detected. Re-authenticating via SSO in a few seconds...");
-        setTimeout(login, getDelay(5000));
+    if (isLogoutPage) {
+        debug("Logout state detected via URL or Page Content. Redirecting to SSO in 5s...");
+        setTimeout(login, 5000);
         return;
     }
 
-    // Main keep-alive interval
-    const café = setInterval(() => {
+    // Keepalive Interval
+    setInterval(() => {
         const start = Date.now();
-        
-        // Dispatch event to Jamf's activity listener
         const mousedown = new MouseEvent('mousedown', {
             bubbles: true,
             cancelable: true,
@@ -63,12 +68,10 @@
         const remaining = authExpiration();
         if (remaining !== null) {
             debug(`Keep-alive sent. Token expires in ${Math.round(remaining / 1000)}s`);
-            // If the token is already expired, trigger the SSO redirect
             if (remaining < 1) login();
         } else {
             debug("Keep-alive sent (Token info unavailable).");
         }
-
         last = start;
     }, delay);
 
