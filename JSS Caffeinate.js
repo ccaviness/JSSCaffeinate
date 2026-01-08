@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        JSS Caffeinate (SSO Optimized)
-// @version     1.1
-// @description High-stability version with light monitoring and improved logout logic.
+// @version     1.2
+// @description Improved Deep Linking and more robust session restoration.
 // @match       https://hrt.jamfcloud.com/*
 // @grant       none
 // @noframes
@@ -11,7 +11,7 @@
     'use strict';
 
     const scriptName = (typeof GM_info !== 'undefined') ? GM_info.script.name : "JSS Caffeinate";
-    const scriptVersion = (typeof GM_info !== 'undefined') ? GM_info.script.version : "1.1";
+    const scriptVersion = (typeof GM_info !== 'undefined') ? GM_info.script.version : "1.2";
     const ssoUrl = "https://hrt.jamfcloud.com/oauth2/authorization/idp-us-hudson-trading.com";
     const delay = 120000; 
     const jssCaffeinateDebug = true;
@@ -22,13 +22,41 @@
         }
     };
 
+    // --- Deep Linking Logic ---
+    const saveCurrentPage = () => {
+        const url = window.location.href;
+        const path = window.location.pathname;
+        
+        // Don't bookmark the dashboard, login, or logout pages
+        const isExcluded = path === '/' || path === '/dashboard' || path.includes('/logout') || path.includes('/login');
+        
+        if (!isExcluded) {
+            sessionStorage.setItem('jss_last_good_url', url);
+            debug(`Bookmarked current page: ${url}`);
+        }
+    };
+
+    const restoreLastPage = () => {
+        const savedUrl = sessionStorage.getItem('jss_last_good_url');
+        const currentUrl = window.location.href;
+        const isAtLanding = window.location.pathname === '/' || window.location.pathname === '/dashboard';
+
+        debug(`Restoration check: Saved=[${savedUrl ? 'YES' : 'NONE'}], AtLanding=[${isAtLanding}]`);
+
+        if (savedUrl && savedUrl !== currentUrl && isAtLanding) {
+            debug(`Success! Restoring deep link to: ${savedUrl}`);
+            sessionStorage.removeItem('jss_last_good_url');
+            window.location.href = savedUrl;
+            return true;
+        }
+        return false;
+    };
+
     const login = () => {
-        debug("Redirecting to SSO...");
-        sessionStorage.setItem('jss_caffeinate_return_to', window.location.href);
+        debug("Redirecting to SSO for re-auth...");
         location.href = ssoUrl;
     };
 
-    // --- Visual Indicator ---
     const pulseIndicator = () => {
         const el = document.getElementById('jss-caffeinate-indicator');
         if (!el) return;
@@ -46,7 +74,8 @@
         const mousedown = new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window });
         document.dispatchEvent(mousedown);
         pulseIndicator();
-        debug("Keep-alive triggered.");
+        saveCurrentPage(); // Update bookmark whenever we caffeinate
+        debug("Keep-alive triggered and page bookmarked.");
     };
 
     const createIndicator = () => {
@@ -60,31 +89,10 @@
         document.body.appendChild(el);
     };
 
-    // --- Improved Status Logic ---
     const checkStatus = () => {
-        // 1. Immediate URL match (handles manual /logout tests)
-        if (location.pathname.includes('/logout')) {
-            debug("Logout URL detected. Redirecting...");
+        if (location.pathname.includes('/logout') || document.body.innerText.includes("successfully logged out")) {
+            debug("Logout detected. Redirecting...");
             login();
-            return true;
-        }
-
-        // 2. Text match (handles dynamic session timeouts)
-        if (document.body.innerText.includes("successfully logged out")) {
-            debug("Logout text detected. Redirecting...");
-            login();
-            return true;
-        }
-        return false;
-    };
-
-    const restoreLastPage = () => {
-        const savedUrl = sessionStorage.getItem('jss_caffeinate_return_to');
-        const isRoot = window.location.pathname === '/' || window.location.pathname === '/dashboard';
-        if (savedUrl && savedUrl !== window.location.href && isRoot) {
-            debug(`Restoring deep link: ${savedUrl}`);
-            sessionStorage.removeItem('jss_caffeinate_return_to');
-            window.location.href = savedUrl;
             return true;
         }
         return false;
@@ -93,22 +101,26 @@
     // --- Main Execution Flow ---
     console.log(`[${scriptName} v${scriptVersion}] Script loaded.`);
     
-    if (!restoreLastPage()) {
-        // Instead of a MutationObserver, we check for logout state every 5 seconds.
-        // This is significantly lighter on the browser and won't conflict with Angular.
-        setInterval(checkStatus, 5000);
+    // Check Status immediately on load
+    checkStatus();
 
-        // Wait for page to settle before adding the UI
-        window.addEventListener('load', () => {
+    // Setup monitoring after page load
+    window.addEventListener('load', () => {
+        // 1. Try to restore the sub-page
+        if (!restoreLastPage()) {
+            // 2. If not restoring, set up the UI and monitoring
             setTimeout(createIndicator, 1000);
-            checkStatus();
-        });
-    }
+            debug("Status monitor (Interval mode) active.");
+        }
+        
+        // Background check for logout text every 5s
+        setInterval(checkStatus, 5000);
+    });
 
-    // Keepalive Interval
+    // Caffeinate Interval
     setInterval(() => {
         const isAuthPage = location.pathname.includes('/login') || location.pathname.includes('/oauth2');
-        if (isAuthPage) return;
+        if (checkStatus() || isAuthPage) return;
 
         triggerKeepAlive();
         
