@@ -1,57 +1,75 @@
 // ==UserScript==
-// @name        JSS Caffeinate
-// @version     0.3
-// @description Simulates mousedown events every few minutes, to activate keepalive call of JSS
-// @match       https://<yourJssUrlWithoutPort>/*
-// @updateURL   https://github.com/fveja/JSSCaffeinate/raw/main/JSS%20Caffeinate.js
+// @name        JSS Caffeinate (SSO Optimized)
+// @version     0.5
+// @description Keeps Jamf Pro sessions alive and uses direct SSO URL for re-authentication.
+// @match       https://hrt.jamfcloud.com/*
 // @noframes
-// Florin Veja 2022
 // ==/UserScript==
 
-console.log('Started JSS Caffeinate. Running on ' + location.href)
+(function() {
+    'use strict';
 
-// delay, in milliseconds, before we send mousedown event (120000 milliseconds = 2 min)
-const delay = 120000
-var last = Date.now()
-const name = "JSS Caffeinate"
+    // CONFIGURATION
+    const ssoUrl = "https://hrt.jamfcloud.com/oauth2/authorization/idp-us-hudson-trading.com";
+    const delay = 120000; // 2 minutes between keep-alive events
+    const jssCaffeinateDebug = true; // Keep true initially to verify it works
+    const name = "JSS Caffeinate";
+    let last = Date.now();
 
-// set to true for debug console output
-const jssCaffeinateDebug = false
+    const debug = (m) => {
+        if (jssCaffeinateDebug) {
+            console.log(`${name} [${new Date().toLocaleTimeString()}]: ${m}`);
+        }
+    };
 
-// function to send us back to the 
-const login = () => {
-  debug("logging in")
-  location = location.origin
-}
+    const login = () => {
+        debug("Session expired or logout detected. Redirecting to SSO...");
+        // Redirect directly to the OIDC launch URL for automated login
+        location.href = ssoUrl;
+    };
 
-const debug = (m) => {  
-  typeof jssCaffeinateDebug == 'boolean' &&
-      jssCaffeinateDebug &&
-      console.log(name + " debug: " + m)
-}
+    const authExpiration = () => {
+        try {
+            if (localStorage.authToken) {
+                return JSON.parse(localStorage.authToken).expires - Date.now();
+            }
+        } catch (e) {
+            debug("Could not read authToken: " + e.message);
+        }
+        return null;
+    };
 
-const authExpiration = () => { 
-  return JSON.parse(localStorage.authToken).expires - Date.now()
-}
+    const getDelay = (max) => Math.random() * (max - 2000) + 2000;
 
-const getDelay = (max) => {
-  const min = 10000
-  return Math.random() * (max - min) + min
-}
+    // Detect if we are on the logout page
+    if (location.pathname.includes('/logout.html')) {
+        debug("Logout page detected. Re-authenticating via SSO in a few seconds...");
+        setTimeout(login, getDelay(5000));
+        return;
+    }
 
-// if we are on the logout page, log back in
-// randomize to not create a race 
-if (location.pathname == '/logout.html') {
-  setTimeout(login(), getDelay(10000))
-}
+    // Main keep-alive interval
+    const café = setInterval(() => {
+        const start = Date.now();
+        
+        // Dispatch event to Jamf's activity listener
+        const mousedown = new MouseEvent('mousedown', {
+            bubbles: true,
+            cancelable: true,
+            view: window
+        });
+        document.dispatchEvent(mousedown);
 
-const café = setInterval(() => {
-             var start = Date.now()
-             const mousedown = new Event('mousedown')
-             debug('JSS Caffeinate keepalive ' + start)
-             document.dispatchEvent(mousedown)
-             debug("authToken expires in " + authExpiration())
-             debug(last + " - " + start + "=" + (start - last))
-             last = start
-             if (authExpiration() < 1) { login() }
-           }, delay);
+        const remaining = authExpiration();
+        if (remaining !== null) {
+            debug(`Keep-alive sent. Token expires in ${Math.round(remaining / 1000)}s`);
+            // If the token is already expired, trigger the SSO redirect
+            if (remaining < 1) login();
+        } else {
+            debug("Keep-alive sent (Token info unavailable).");
+        }
+
+        last = start;
+    }, delay);
+
+})();
