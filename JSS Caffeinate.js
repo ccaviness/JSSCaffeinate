@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        JSS Caffeinate (Generic)
-// @version     1.4
-// @description Keeps Jamf Pro alive with a prominent red banner alert for manual re-auth.
+// @version     1.9
+// @description Keeps Jamf Pro sessions alive and restores tabs after SSO re-authentication.
 // @match       https://*.jamfcloud.com/*
 // @match       https://us.auth.jamf.com/*
 // @grant       none
@@ -15,24 +15,98 @@
     // Update this suffix to match your SSO identity provider domain
     // Example: "idp-us-yourcompany.com"
     const ssoSuffix = "YOUR_SSO_IDP_SUFFIX_HERE";
+    // Account chooser entry to select automatically, but only when marked "last used"
+    const preferredIdpName = "OktaProd";
     // =================================================
 
     const scriptName = "JSS Caffeinate";
-    const scriptVersion = "1.4";
+    const scriptVersion = "1.9";
     const keepAliveDelay = 120000;
     const jamfUrl = window.location.origin;
     const ssoUrl = `${jamfUrl}/oauth2/authorization/${ssoSuffix}`;
 
-    let currentHref = window.location.href;
-
-    if (!window.name || !window.name.startsWith('jss_tab_')) {
-        window.name = 'jss_tab_' + Math.random().toString(36).substr(2, 9);
+    const tabIdKey = 'jss_caffeinate_tab_id';
+    const initialUrl = new URL(window.location.href);
+    const initialWasOidcCallback = window.location.hostname.endsWith('.jamfcloud.com') &&
+                                   initialUrl.pathname === '/' &&
+                                   initialUrl.searchParams.has('oidcToken');
+    let tabId = sessionStorage.getItem(tabIdKey);
+    if (!tabId) {
+        tabId = window.name && window.name.startsWith('jss_tab_')
+            ? window.name
+            : 'jss_tab_' + Math.random().toString(36).substr(2, 9);
+        sessionStorage.setItem(tabIdKey, tabId);
     }
-    const tabId = window.name;
+    window.name = tabId;
     const bookmarkKey = `bookmark_${tabId}`;
+    const tabBookmarkKey = 'jss_caffeinate_tab_bookmark';
     const reauthLockKey = 'jss_reauth_lock';
+    const reauthCompletedKey = 'jss_reauth_completed';
+    const waitingCycleKey = 'jss_caffeinate_waiting_cycle';
+    const reauthLockMaxAge = 120000;
 
     const debug = (m) => { console.log(`${scriptName} [${new Date().toLocaleTimeString()}]: ${m}`); };
+
+    const getAccountChooserButton = () => [...document.querySelectorAll('button.idp-connection-container')]
+        .find((button) => {
+            const text = button.innerText.replace(/\s+/g, ' ').trim();
+            return text.includes(preferredIdpName) && text.toLowerCase().includes('last used');
+        });
+
+    const readReauthLock = () => {
+        const raw = localStorage.getItem(reauthLockKey);
+        if (!raw) return null;
+        try {
+            const lock = JSON.parse(raw);
+            return lock && lock.owner && lock.cycle && Number.isFinite(lock.createdAt) ? lock : null;
+        } catch (_) {
+            return null;
+        }
+    };
+
+    const ownsReauthLock = () => {
+        const lock = readReauthLock();
+        return Boolean(lock && lock.owner === tabId);
+    };
+
+    const claimReauthLock = () => {
+        const lock = readReauthLock();
+        if (lock && Date.now() - lock.createdAt < reauthLockMaxAge) {
+            if (lock.owner !== tabId) sessionStorage.setItem(waitingCycleKey, lock.cycle);
+            return lock.owner === tabId;
+        }
+        const cycle = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`;
+        localStorage.setItem(reauthLockKey, JSON.stringify({ owner: tabId, cycle, createdAt: Date.now() }));
+        debug('[AUTH] This tab claimed the re-authentication lock.');
+        return true;
+    };
+
+    const markReauthComplete = () => {
+        const lock = readReauthLock();
+        if (!lock || lock.owner !== tabId) return false;
+        localStorage.setItem(reauthCompletedKey, JSON.stringify({ cycle: lock.cycle, completedAt: Date.now() }));
+        localStorage.removeItem(reauthLockKey);
+        return true;
+    };
+
+    const completedWaitingCycle = () => {
+        const waitingCycle = sessionStorage.getItem(waitingCycleKey);
+        if (!waitingCycle) return false;
+        try {
+            const completed = JSON.parse(localStorage.getItem(reauthCompletedKey));
+            return completed && completed.cycle === waitingCycle;
+        } catch (_) {
+            return false;
+        }
+    };
+
+    const resumeCompletedCycle = () => {
+        if (!completedWaitingCycle()) return false;
+        sessionStorage.removeItem(waitingCycleKey);
+        debug('[AUTH] The shared SSO cycle completed; resuming this tab.');
+        if (!restoreSavedPage('SSO completed in another tab')) window.location.href = jamfUrl;
+        return true;
+    };
 
     const saveCurrentPage = () => {
         const url = window.location.href;
@@ -42,15 +116,26 @@
                            path.includes('/login') || url.includes('original_url=') ||
                            url.includes('auth.jamf.com');
         if (isExcluded) return;
+        sessionStorage.setItem(tabBookmarkKey, url);
         localStorage.setItem(bookmarkKey, url);
     };
 
+    const getSavedPage = () => sessionStorage.getItem(tabBookmarkKey) || localStorage.getItem(bookmarkKey);
+
+    const restoreSavedPage = (reason) => {
+        const savedUrl = getSavedPage();
+        if (!savedUrl || window.location.href === savedUrl) return false;
+        debug(`[RESTORE] ${reason}; returning to saved page.`);
+        window.location.replace(savedUrl);
+        return true;
+    };
+
     const restoreLastPage = () => {
-        const savedUrl = localStorage.getItem(bookmarkKey);
+        const savedUrl = getSavedPage();
         const isAtLanding = window.location.pathname === '/' || window.location.pathname === '/dashboard';
-        if (savedUrl && isAtLanding && window.location.href !== savedUrl) {
+        const isAuthenticated = Boolean(document.querySelector('jamf-pro-sidebar'));
+        if (savedUrl && isAtLanding && isAuthenticated && window.location.href !== savedUrl) {
             debug(`[RESTORE] Redirecting to bookmark: ${savedUrl}`);
-            localStorage.removeItem(bookmarkKey);
             window.location.replace(savedUrl);
             return true;
         }
@@ -79,7 +164,13 @@
         const url = window.location.href;
         const bodyText = document.body.innerText;
 
-        const isAuthPage = url.includes('/login') || url.includes('auth.jamf.com');
+        const chooserButton = getAccountChooserButton();
+        const isOidcCallback = initialWasOidcCallback || (
+            window.location.hostname.endsWith('.jamfcloud.com') &&
+            window.location.pathname === '/' &&
+            new URLSearchParams(window.location.search).has('oidcToken')
+        );
+        const isAuthPage = url.includes('/login') || url.includes('auth.jamf.com') || Boolean(chooserButton);
         const hasError = url.includes('error=') || url.includes('forbidden') || bodyText.includes("something went wrong");
 
         if (isAuthPage && hasError) {
@@ -88,27 +179,71 @@
             return false;
         }
 
-        const isLogout = url.includes('/logout') || bodyText.includes("successfully logged out");
+        // Jamf's central auth service owns this part of the redirect chain. Its
+        // localStorage and origin differ from the tenant, so do not start a new flow here.
+        if (url.includes('auth.jamf.com')) return true;
+
+        if (isOidcCallback) {
+            if (markReauthComplete()) {
+                debug('[AUTH] OIDC callback received; released the re-authentication lock.');
+            }
+            restoreSavedPage('Authentication complete');
+            return true;
+        }
+
+        const isLogout = url.includes('/logout') || bodyText.toLowerCase().includes('successfully logged out');
         const isLogin = url.includes('/login') || url.includes('original_url=');
         const isDenied = bodyText.includes("Access denied") && bodyText.includes("identity provider");
 
-        if (isLogout || isLogin || isDenied) {
-            const lock = localStorage.getItem(reauthLockKey);
-            if (lock && (Date.now() - parseInt(lock)) < 45000) {
+        if (isLogout || isLogin || isDenied || chooserButton) {
+            if (resumeCompletedCycle()) return true;
+            if (!claimReauthLock()) {
                 if (!window.lockMonitorActive) {
                     window.lockMonitorActive = true;
+                    debug('[AUTH] Another tab is handling SSO; waiting.');
+                    const resumeAfterSso = () => {
+                        if (!completedWaitingCycle()) return;
+                        clearInterval(lockWatcher);
+                        window.removeEventListener('storage', storageWatcher);
+                        document.removeEventListener('visibilitychange', visibilityWatcher);
+                        resumeCompletedCycle();
+                    };
+                    const storageWatcher = (event) => {
+                        if (event.key === reauthCompletedKey) resumeAfterSso();
+                    };
+                    const visibilityWatcher = () => {
+                        if (document.visibilityState === 'visible') resumeAfterSso();
+                    };
                     const lockWatcher = setInterval(() => {
-                        if (!localStorage.getItem(reauthLockKey)) {
-                            clearInterval(lockWatcher);
-                            window.location.href = jamfUrl;
-                        }
+                        resumeAfterSso();
                     }, 2000);
+                    window.addEventListener('storage', storageWatcher);
+                    document.addEventListener('visibilitychange', visibilityWatcher);
                 }
                 return true;
             }
-            localStorage.setItem(reauthLockKey, Date.now().toString());
-            location.href = ssoUrl;
+
+            if (chooserButton) {
+                if (!window.preferredIdpClicked) {
+                    window.preferredIdpClicked = true;
+                    debug(`[AUTH] Selecting last-used identity provider: ${preferredIdpName}`);
+                    chooserButton.click();
+                }
+                return true;
+            }
+
+            if (!window.ssoRedirectStarted) {
+                window.ssoRedirectStarted = true;
+                debug('[AUTH] Starting SSO authentication.');
+                location.href = ssoUrl;
+            }
             return true;
+        }
+
+        const isAuthenticated = Boolean(document.querySelector('jamf-pro-sidebar'));
+        if (isAuthenticated && ownsReauthLock()) {
+            markReauthComplete();
+            debug('[AUTH] Authentication complete; released the re-authentication lock.');
         }
         return false;
     };
@@ -125,20 +260,17 @@
     };
 
     const startApp = () => {
-        if (window.location.href.includes('jamfcloud.com') && !window.location.pathname.includes('login')) {
-            localStorage.removeItem(reauthLockKey);
-        }
-
         let attempts = 0;
         const restorer = setInterval(() => {
-            if (restoreLastPage() || attempts > 40) clearInterval(restorer);
+            const authenticationInProgress = checkStatus();
+            if ((!authenticationInProgress && restoreLastPage()) || attempts > 120) clearInterval(restorer);
             attempts++;
         }, 500);
 
         // UI Initialization - Wait for sidebar OR the login card OR error text
         const stabInterval = setInterval(() => {
             const hasSidebar = document.querySelector('jamf-pro-sidebar');
-            const hasCard = document.querySelector('.card') || document.querySelector('jamf-pro-card');
+            const hasCard = document.querySelector('.card') || document.querySelector('jamf-pro-card') || getAccountChooserButton();
             const hasLogin = window.location.pathname.includes('login');
 
             if (hasSidebar || hasCard || hasLogin) {
