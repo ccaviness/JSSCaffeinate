@@ -1,63 +1,121 @@
-# JSS Caffeinate (v1.0)
+# JSS Caffeinate
 
-#### Automatically keeps Jamf Pro sessions alive and restores your work tabs after SSO re-authentication
+JSS Caffeinate is a browser userscript that helps keep Jamf Pro sessions active. If Jamf signs out, it coordinates SSO re-authentication across multiple tabs and restores each tab to its last saved Jamf page.
 
-## Overview
+## Features
 
-JSS Caffeinate was created to solve the frustration of being logged out of Jamf Pro when working with multiple tabs. Version 1.0 is a rewrite designed for modern Jamf Pro instances using **SSO/OIDC (Okta, Azure, etc.)**.
+- Sends a synthetic activity event every two minutes to exercise Jamf's keep-alive behavior.
+- Saves a separate deep-link bookmark for each Jamf tab.
+- Allows only one tab to initiate SSO while other signed-out tabs wait.
+- Restores the authenticating tab and all waiting tabs to their respective pages after SSO succeeds.
+- Can select a configured, last-used identity provider from Jamf's account chooser.
+- Displays a red banner when Jamf reports an authentication error requiring manual intervention.
+- Provides a coffee-cup control for manually sending an activity event and saving the current page.
 
-## Key Features
+## Requirements
 
-* **Multi-Tab Support**: Unlike simple keep-alive scripts, JSS Caffeinate assigns a unique ID to every tab. Each tab remembers its own specific sub-page (e.g., a specific Policy or Profile).
-* **Deep Link Restoration**: If you are signed out, the script automatically re-authenticates via SSO and returns every open tab to the exact page it was on before the timeout.
-* **SSO Anti-Collision**: Prevents multiple tabs from trying to log in at the exact same millisecond, which avoids the common "Oops! Something went wrong" Jamf auth error.
-* **Angular-Safe**: Includes built-in stability delays to prevent interference with Jamf Pro's internal framework loading.
+- A Jamf Pro Cloud instance at `https://*.jamfcloud.com/`.
+- Jamf SSO/OIDC authentication.
+- A userscript extension such as [Tampermonkey](https://www.tampermonkey.net/).
 
-## How to Use
+Chrome must permit the extension to execute userscripts. Open `chrome://extensions`, select Tampermonkey, and enable **Allow User Scripts** and appropriate site access. If this permission is disabled, Tampermonkey may show the script as enabled while never injecting it into Jamf.
 
-### 1. Install a Userscript Plugin
+## Installation
 
-You will need a browser extension to run this script.
+1. Install Tampermonkey or another compatible userscript extension.
+2. Create a userscript and paste the contents of `JSS Caffeinate.js` into it.
+3. Configure the values described below.
+4. Save the script and reload all open Jamf tabs.
+5. Confirm that a coffee cup appears at the lower-right and the console contains a message such as:
 
-* [Tampermonkey](https://www.tampermonkey.net) (**Recommended**)
-* [Greasemonkey](https://addons.mozilla.org/en-US/firefox/addon/greasemonkey/)
-* [Userscripts (Safari/iOS)](https://apps.apple.com/us/app/userscripts/id1463298887)
+   ```text
+   [JSS Caffeinate v1.10] Script loaded.
+   ```
 
-### 2. Configuration (Required)
+## Configuration
 
-To enable automated re-authentication, you must provide your instance's SSO IDP suffix:
+Configuration is near the beginning of `JSS Caffeinate.js`.
 
-1. Open your Jamf Pro instance.
-2. Manually log out or wait for a redirect to your SSO provider.
-3. Look at the URL. It will look something like this: `.../oauth2/authorization/idp-your-company.com`
-4. Copy the part after `/authorization/` (e.g., `idp-your-company.com`).
-5. Edit the script and paste that value into the `ssoSuffix` variable at the top:
+### SSO identity-provider suffix (required)
 
 ```javascript
-const ssoSuffix = "idp-your-company.com";
-
+const ssoSuffix = "YOUR_SSO_IDP_SUFFIX_HERE";
 ```
 
-### 3. Usage
+This is the value following `/oauth2/authorization/` in the Jamf SSO URL. For example, given:
 
-Once installed and configured, you will see a small grayscale coffee cup (☕) in the bottom-right corner of your Jamf Pro tabs.
+```text
+https://example.jamfcloud.com/oauth2/authorization/idp-us-example.com
+```
 
-* **Automatic**: Every 2 minutes, the script simulates activity to keep your session alive.
-* **Manual**: Click the ☕ icon at any time to manually "caffeinate" the session.
+configure:
 
-## How it Works
+```javascript
+const ssoSuffix = "idp-us-example.com";
+```
 
-* **Persistence Engine**: The script uses `window.name` to identify tabs and `sessionStorage` to bookmark your location. Even through multiple redirects to Okta/Azure and back, the tab never loses its place.
-* **The Re-auth Lock**: When a logout is detected, the first tab to notice it claims a "Re-auth Lock" in `localStorage`. Other tabs will wait patiently for that tab to finish the login before refreshing themselves.
-* **Stability Monitor**: The script waits 10 seconds after a page loads before it begins monitoring. This ensures Jamf's sidebar and dashboard services are fully initialized, preventing "TypeError" crashes in the browser console.
+### Preferred account chooser entry (optional)
 
-## Change Log
+```javascript
+const preferredIdpName = "";
+```
 
-* **v1.0**: Published "Generic" edition. Added automatic instance detection, `ssoSuffix` configuration, and multi-tab "Anti-Collision" logic.
-* **v0.9**: Added "Safe Mode" startup to bypass Angular framework conflicts.
-* **v0.8**: Introduced deep linking and visual feedback indicators.
-* **v0.3**: Fixed a glitch where the debug flag was not initialized properly.
+Some Jamf instances show an account chooser before redirecting to the company identity provider. To automatically select a particular entry, set its displayed name exactly:
 
----
+```javascript
+const preferredIdpName = "CompanyOkta";
+```
 
-*Original script by Florin Veja (2022). Updated for modern SSO and Multi-tab support (2024).*
+The script clicks the matching entry only when that entry is also marked `last used`. Leave the value blank to disable automatic selection. Do not use the example value unless it is the actual label displayed by your Jamf instance.
+
+## How it works
+
+### Keep-alive
+
+After a 45-second startup delay, the script dispatches a bubbling `mousedown` event every two minutes while the tab is on Jamf and not in an authentication state. The coffee cup sends the same event immediately. Console messages confirm that the event was dispatched, although Jamf ultimately determines whether it extends the server-side session.
+
+### Per-tab bookmarks
+
+Every usable Jamf page is saved every five seconds. Login, logout, dashboard, root, and central-authentication pages are excluded so they cannot replace a useful deep link.
+
+- `sessionStorage` holds the authoritative bookmark and stable ID for the current tab.
+- `localStorage` holds a bookmark keyed by that tab ID as a fallback across redirect behavior.
+- `window.name` mirrors the tab ID for compatibility with older redirect flows.
+
+Bookmarks are retained during authentication and are not deleted when restoration begins.
+
+### Multi-tab SSO coordination
+
+When Jamf logout or login state is detected, the first tab creates a re-authentication lock in `localStorage`. The lock includes the owner tab ID, a unique cycle ID, and its creation time.
+
+The owner navigates to the configured Jamf SSO endpoint. Other tabs record that cycle and wait instead of starting competing OIDC transactions. When Jamf returns the owner through its OIDC callback, the owner publishes a completion record and releases the lock. Waiting tabs observe that completion through storage events, polling, or becoming visible, then restore their own bookmarks.
+
+The cycle ID prevents a waiting tab from mistaking a released lock for permission to initiate a second, conflicting SSO request.
+
+### Authentication errors
+
+If Jamf or the central Jamf authentication service returns an error URL or an “Oops! Something went wrong” page, the script stops automatic handling on that page and displays a red manual-intervention banner.
+
+## Current limitations
+
+- The re-authentication lock currently expires after two minutes. Interactive SSO left unfinished longer than that, such as overnight, may allow another tab to begin a new authentication cycle. Long-lived/manual authentication handling is planned but is not yet safe to rely on.
+- A successful login performed in an unrelated new tab does not currently guarantee that an existing pending cycle will be completed and its waiting tabs restored.
+- Account chooser automation depends on Jamf's current `button.idp-connection-container` markup and the visible `last used` text.
+- The userscript matches Jamf Cloud and `https://us.auth.jamf.com/`; other Jamf hosting regions may require another `@match` entry.
+
+## Troubleshooting
+
+- **No coffee cup or startup log:** Check Chrome's **Allow User Scripts** permission and Tampermonkey site access.
+- **A tab remains on logout:** Open DevTools, enable **Preserve log**, and look for `[AUTH]` messages.
+- **Authentication reports “Oops”:** More than one OIDC transaction may have started. Clear `jss_reauth_lock` only after the active authentication attempt has ended, then reload the tabs.
+- **A tab does not restore:** Before logout, verify its bookmark with:
+
+  ```javascript
+  sessionStorage.getItem("jss_caffeinate_tab_bookmark")
+  ```
+
+Avoid sharing complete OIDC callback URLs in logs. They can contain authorization codes, state values, or tokens.
+
+## History
+
+The original script was created by Florin Veja in 2022. This fork adds modern Jamf SSO/OIDC handling, per-tab deep-link restoration, account chooser support, and coordinated multi-tab authentication.

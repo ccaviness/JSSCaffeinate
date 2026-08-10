@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        JSS Caffeinate (Generic)
-// @version     1.9
+// @version     1.10
 // @description Keeps Jamf Pro sessions alive and restores tabs after SSO re-authentication.
 // @match       https://*.jamfcloud.com/*
 // @match       https://us.auth.jamf.com/*
@@ -15,12 +15,13 @@
     // Update this suffix to match your SSO identity provider domain
     // Example: "idp-us-yourcompany.com"
     const ssoSuffix = "YOUR_SSO_IDP_SUFFIX_HERE";
-    // Account chooser entry to select automatically, but only when marked "last used"
-    const preferredIdpName = "OktaProd";
+    // Optional: exact account chooser entry to select when it is marked "last used"
+    // Leave blank to disable automatic account chooser selection.
+    const preferredIdpName = "";
     // =================================================
 
     const scriptName = "JSS Caffeinate";
-    const scriptVersion = "1.9";
+    const scriptVersion = "1.10";
     const keepAliveDelay = 120000;
     const jamfUrl = window.location.origin;
     const ssoUrl = `${jamfUrl}/oauth2/authorization/${ssoSuffix}`;
@@ -47,11 +48,12 @@
 
     const debug = (m) => { console.log(`${scriptName} [${new Date().toLocaleTimeString()}]: ${m}`); };
 
-    const getAccountChooserButton = () => [...document.querySelectorAll('button.idp-connection-container')]
-        .find((button) => {
+    const getAccountChooserButton = () => preferredIdpName
+        ? [...document.querySelectorAll('button.idp-connection-container')].find((button) => {
             const text = button.innerText.replace(/\s+/g, ' ').trim();
             return text.includes(preferredIdpName) && text.toLowerCase().includes('last used');
-        });
+        })
+        : null;
 
     const readReauthLock = () => {
         const raw = localStorage.getItem(reauthLockKey);
